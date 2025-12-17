@@ -1,15 +1,16 @@
 # app.py
 # MrBeast Total Views Tracker
 # - Stores snapshots in PostgreSQL
-# - Updates every 10 minutes
+# - Updates every 5 minutes on exact multiples (:00, :05, :10, ...)
 # - Uses Indian Standard Time (IST)
-# - Displays data in table on website
+# - Exposes endpoints for total, history (optionally per-day) and daily aggregates
 
 import os
 import time
 import threading
 import requests
 from datetime import datetime, timedelta, timezone
+from math import ceil
 
 from flask import Flask, jsonify, render_template, request
 from sqlalchemy import create_engine, text
@@ -23,7 +24,7 @@ except Exception:
     IST = timezone(timedelta(hours=5, minutes=30))
 # --------------------------------------------------------------
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static", template_folder="templates")
 
 # ---------------- CONFIG ----------------
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
@@ -34,9 +35,9 @@ MRBEAST_CHANNEL_ID = os.environ.get(
 DATABASE_URL = os.environ.get("DATABASE_URL")
 SNAPSHOT_TOKEN = os.environ.get("SNAPSHOT_TOKEN")
 
-# 🔥 10 minutes (600 seconds)
+# fetch every 5 minutes on :00, :05, :10, ...
 SNAPSHOT_INTERVAL_SECONDS = int(
-    os.environ.get("SNAPSHOT_INTERVAL_SECONDS", 10 * 60)
+    os.environ.get("SNAPSHOT_INTERVAL_SECONDS", 5 * 60)
 )
 
 DISABLE_INTERNAL_SCHEDULER = os.environ.get(
@@ -141,6 +142,7 @@ def get_total_views(video_ids):
 # ---------------- SNAPSHOT LOGIC ----------------
 def take_snapshot():
     if not YOUTUBE_API_KEY or engine is None:
+        app.logger.debug("Skipping snapshot: missing API key or DB.")
         return
 
     try:
@@ -155,6 +157,7 @@ def take_snapshot():
             ).scalar()
 
             if not locked:
+                app.logger.info("Could not acquire advisory lock; skipping snapshot.")
                 return
 
             try:
@@ -174,7 +177,7 @@ def take_snapshot():
                         VALUES (:ts, :tv, :vg)
                     """),
                     {
-                        "ts": datetime.now(IST),   # IST stored
+                        "ts": datetime.now(IST),   # IST stored as timestamptz
                         "tv": total_views,
                         "vg": gain
                     }
@@ -192,11 +195,34 @@ def take_snapshot():
 # -------------------------------------------------
 
 
-# ---------------- SCHEDULER ----------------
+# ---------------- SCHEDULER (align to exact :00/:05/:10 ...) ----------------
+def seconds_until_next_multiple_of_five(now_dt):
+    # now_dt is an aware datetime in IST
+    next_minute = (ceil(now_dt.minute / 5) * 5) % 60
+    # compute the next time which has minute %5 == 0 and second == 0
+    # if now is exactly on a multiple and second == 0 -> run immediately
+    if now_dt.minute % 5 == 0 and now_dt.second == 0:
+        return 0
+    # otherwise compute delta to next multiple
+    minutes_to_add = (5 - (now_dt.minute % 5))
+    next_dt = (now_dt + timedelta(minutes=minutes_to_add)).replace(second=0, microsecond=0)
+    delta = (next_dt - now_dt).total_seconds()
+    if delta < 0:
+        delta = 0
+    return int(delta)
+
+
 def scheduler_loop():
-    app.logger.info("Scheduler started (10-minute interval)")
+    app.logger.info("Scheduler started (5-minute aligned interval)")
     while True:
+        now_ist = datetime.now(IST)
+        wait = seconds_until_next_multiple_of_five(now_ist)
+        if wait > 0:
+            app.logger.info("Sleeping %ds until next aligned snapshot (next multiple of 5 min).", wait)
+            time.sleep(wait)
+        # take snapshot exactly on the aligned minute
         take_snapshot()
+        # then sleep full interval (5 minutes) until next aligned minute
         time.sleep(SNAPSHOT_INTERVAL_SECONDS)
 # -------------------------------------------
 
@@ -225,22 +251,86 @@ def total():
 
 @app.route("/history")
 def history():
+    """
+    Returns recent snapshots or snapshots for a specific day.
+    Query param:
+      - day (optional): YYYY-MM-DD (IST) to filter snapshots for that calendar day in IST
+    """
     if engine is None:
         return jsonify({"error": "DB not configured"}), 400
 
+    day = request.args.get("day")
     with engine.connect() as conn:
-        rows = conn.execute(text("""
-            SELECT ts, total_views, view_gain
-            FROM view_snapshots
-            ORDER BY ts DESC
-            LIMIT 100
-        """)).fetchall()
+        if day:
+            # filter snapshots where the IST-local date equals the requested day
+            rows = conn.execute(text("""
+                SELECT ts, total_views, view_gain
+                FROM view_snapshots
+                WHERE ((ts AT TIME ZONE 'Asia/Kolkata')::date) = :day
+                ORDER BY ts DESC
+            """), {"day": day}).fetchall()
+        else:
+            rows = conn.execute(text("""
+                SELECT ts, total_views, view_gain
+                FROM view_snapshots
+                ORDER BY ts DESC
+                LIMIT 100
+            """)).fetchall()
 
     return jsonify([
         {
             "ts": r[0].isoformat(),
             "total_views": int(r[1]),
             "view_gain": int(r[2]) if r[2] is not None else None
+        }
+        for r in rows
+    ])
+
+
+@app.route("/daily")
+def daily():
+    """
+    Returns day-wise aggregates:
+      - day (YYYY-MM-DD IST)
+      - first_total: total_views at first snapshot of the day (IST)
+      - last_total: total_views at last snapshot of the day (IST)
+      - daily_gain: last_total - first_total
+      - snaps: number of snapshots recorded that day
+    """
+    if engine is None:
+        return jsonify({"error": "DB not configured"}), 400
+
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            WITH extremes AS (
+                SELECT ((ts AT TIME ZONE 'Asia/Kolkata')::date) AS day,
+                       MIN(ts) AS first_ts,
+                       MAX(ts) AS last_ts,
+                       COUNT(*) as snaps
+                FROM view_snapshots
+                GROUP BY day
+                ORDER BY day DESC
+                LIMIT 365
+            )
+            SELECT
+                e.day::text AS day,
+                v_first.total_views AS first_total,
+                v_last.total_views AS last_total,
+                (v_last.total_views - v_first.total_views) AS daily_gain,
+                e.snaps
+            FROM extremes e
+            JOIN view_snapshots v_first ON v_first.ts = e.first_ts
+            JOIN view_snapshots v_last ON v_last.ts = e.last_ts
+            ORDER BY e.day DESC;
+        """)).fetchall()
+
+    return jsonify([
+        {
+            "day": r[0],
+            "first_total": int(r[1]),
+            "last_total": int(r[2]),
+            "daily_gain": int(r[3]),
+            "snaps": int(r[4])
         }
         for r in rows
     ])
