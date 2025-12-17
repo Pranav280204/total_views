@@ -1,7 +1,7 @@
 # app.py
 # MrBeast Total Views Tracker
 # - Stores snapshots in PostgreSQL
-# - Updates every 30 minutes
+# - Updates every 10 minutes
 # - Uses Indian Standard Time (IST)
 # - Displays data in table on website
 
@@ -34,9 +34,9 @@ MRBEAST_CHANNEL_ID = os.environ.get(
 DATABASE_URL = os.environ.get("DATABASE_URL")
 SNAPSHOT_TOKEN = os.environ.get("SNAPSHOT_TOKEN")
 
-# 30 minutes
+# 🔥 10 minutes (600 seconds)
 SNAPSHOT_INTERVAL_SECONDS = int(
-    os.environ.get("SNAPSHOT_INTERVAL_SECONDS", 30 * 60)
+    os.environ.get("SNAPSHOT_INTERVAL_SECONDS", 10 * 60)
 )
 
 DISABLE_INTERNAL_SCHEDULER = os.environ.get(
@@ -174,7 +174,7 @@ def take_snapshot():
                         VALUES (:ts, :tv, :vg)
                     """),
                     {
-                        "ts": datetime.now(IST),   # ✅ IST stored
+                        "ts": datetime.now(IST),   # IST stored
                         "tv": total_views,
                         "vg": gain
                     }
@@ -194,7 +194,7 @@ def take_snapshot():
 
 # ---------------- SCHEDULER ----------------
 def scheduler_loop():
-    app.logger.info("Scheduler started (30-minute interval)")
+    app.logger.info("Scheduler started (10-minute interval)")
     while True:
         take_snapshot()
         time.sleep(SNAPSHOT_INTERVAL_SECONDS)
