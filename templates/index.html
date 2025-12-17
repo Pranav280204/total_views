@@ -6,80 +6,138 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #0f172a;
-      color: #ffffff;
-      margin: 0;
-      padding: 40px;
+    :root{
+      --accent: #0b62ff; /* blue */
+      --accent-dark: #054ecc;
+      --bg: #ffffff;
+      --card: #f8fbff;
+      --muted: #222222;
+      --positive: #16a34a; /* green */
+      --negative: #e11d48; /* red */
+      --table-border: rgba(0,0,0,0.08);
     }
 
-    .container {
-      max-width: 1000px;
-      margin: auto;
+    html,body{
+      margin:0;
+      padding:0;
+      font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--muted);
+      -webkit-font-smoothing:antialiased;
+      -moz-osx-font-smoothing:grayscale;
     }
 
-    .card {
-      background: #111827;
-      padding: 24px;
+    .container{
+      max-width: 1100px;
+      margin: 36px auto;
+      padding: 18px;
+    }
+
+    .card{
+      background: var(--card);
       border-radius: 12px;
-      box-shadow: 0 6px 18px rgba(0,0,0,0.4);
+      padding: 20px;
+      box-shadow: 0 6px 18px rgba(13,38,79,0.06);
+      border: 1px solid rgba(11,98,255,0.06);
     }
 
-    h1 {
-      margin-top: 0;
-      font-size: 28px;
+    header {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap: 12px;
+      flex-wrap:wrap;
+    }
+
+    h1{
+      margin:0;
+      font-size:20px;
+      color: var(--accent-dark);
     }
 
     .summary {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 20px;
-      margin-bottom: 20px;
+      display:flex;
+      gap:20px;
+      align-items:center;
+      flex-wrap:wrap;
+      margin-top:12px;
+      margin-bottom:18px;
+      justify-content:space-between;
+    }
+
+    .left {
+      display:flex;
+      gap:18px;
+      align-items:center;
+      flex-wrap:wrap;
     }
 
     .total {
-      font-size: 38px;
-      color: #38bdf8;
-      font-weight: bold;
+      font-size:36px;
+      font-weight:700;
+      color: #000;
     }
 
     .last-update {
-      color: #9ca3af;
-      font-size: 14px;
+      font-size:13px;
+      color: #444;
     }
 
-    button {
-      padding: 8px 14px;
-      background: #2563eb;
+    .controls {
+      display:flex;
+      gap:10px;
+      align-items:center;
+    }
+
+    button, select {
+      border-radius:8px;
+      padding:8px 12px;
+      border: 1px solid rgba(0,0,0,0.08);
+      font-size:14px;
+      cursor:pointer;
+      background: white;
+      color: #111;
+    }
+
+    button.primary {
+      background: linear-gradient(180deg,var(--accent),var(--accent-dark));
       color: #fff;
       border: none;
-      border-radius: 6px;
-      cursor: pointer;
     }
 
-    button:hover {
-      background: #1d4ed8;
+    button.ghost {
+      background: transparent;
+      border: 1px solid rgba(11,98,255,0.12);
+      color: var(--accent-dark);
+    }
+
+    .note {
+      margin-top:12px;
+      color:#444;
+      font-size:13px;
     }
 
     table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 18px;
+      width:100%;
+      border-collapse:collapse;
+      margin-top:16px;
+      background: white;
+      border-radius:8px;
+      overflow:hidden;
     }
 
     th, td {
-      text-align: left;
-      padding: 10px;
-      border-bottom: 1px solid rgba(255,255,255,0.08);
+      padding:10px 12px;
+      text-align:left;
+      border-bottom: 1px solid var(--table-border);
+      font-size:14px;
     }
 
-    th {
-      color: #9ca3af;
-      font-size: 13px;
-      text-transform: uppercase;
+    thead th {
+      font-size:12px;
+      color:#0b62ff;
+      text-transform:uppercase;
+      letter-spacing:0.6px;
     }
 
     td.num {
@@ -87,25 +145,29 @@
     }
 
     .gain-positive {
-      color: #22c55e;
-      font-weight: bold;
+      color: var(--positive);
+      font-weight:700;
     }
 
     .gain-negative {
-      color: #ef4444;
-      font-weight: bold;
+      color: var(--negative);
+      font-weight:700;
     }
 
-    .error {
-      color: #ef4444;
-      margin-top: 10px;
-      display: none;
+    .muted {
+      color:#666;
+      font-size:13px;
     }
 
-    .note {
-      margin-top: 10px;
-      color: #9ca3af;
-      font-size: 13px;
+    .top-row {
+      display:flex;
+      gap:12px;
+      align-items:center;
+    }
+
+    @media (max-width:700px){
+      .summary { flex-direction:column; align-items:flex-start; gap:8px; }
+      .controls { width:100%; justify-content:flex-start; }
     }
   </style>
 </head>
@@ -113,37 +175,72 @@
 <body>
   <div class="container">
     <div class="card">
-      <h1>MrBeast – Total Views Tracker</h1>
+      <header>
+        <div>
+          <h1>MrBeast — Total Views (IST)</h1>
+          <div class="muted">Automatic snapshots at exact :00, :05, :10 ... (every 5 minutes IST)</div>
+        </div>
+
+        <div class="controls">
+          <button class="primary" onclick="refreshAll()">Refresh</button>
+          <button class="ghost" onclick="triggerSnapshot()">Take snapshot now</button>
+        </div>
+      </header>
 
       <div class="summary">
-        <div>
-          <div class="total" id="totalViews">Loading…</div>
-          <div class="last-update" id="lastUpdate">—</div>
+        <div class="left">
+          <div>
+            <div class="total" id="totalViews">Loading…</div>
+            <div class="last-update" id="lastUpdate">—</div>
+          </div>
+
+          <div style="min-width:220px;">
+            <label for="daySelect" class="muted" style="display:block;margin-bottom:6px;">Select day (IST)</label>
+            <select id="daySelect" onchange="loadForDay()">
+              <option value="">— Daily summary —</option>
+            </select>
+          </div>
         </div>
-        <div>
-          <button onclick="refreshAll()">Refresh</button>
-        </div>
+
+        <div class="muted" id="infoRight">Snapshots stored every 5 minutes (aligned)</div>
       </div>
 
-      <div id="error" class="error"></div>
+      <div id="error" style="color:#ef4444;display:none;margin-bottom:10px;"></div>
 
-      <table>
-        <thead>
-          <tr>
-            <th>Time (IST)</th>
-            <th>Total Views</th>
-            <th>Gain</th>
-          </tr>
-        </thead>
-        <tbody id="tableBody">
-          <tr>
-            <td colspan="3">Loading…</td>
-          </tr>
-        </tbody>
-      </table>
+      <div id="dailyView">
+        <table id="dailyTable">
+          <thead>
+            <tr>
+              <th>Day (IST)</th>
+              <th>First total</th>
+              <th>Last total</th>
+              <th>Gain (day)</th>
+              <th>Snapshots</th>
+            </tr>
+          </thead>
+          <tbody id="dailyBody">
+            <tr><td colspan="5">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div id="daySnapshots" style="display:none;">
+        <table id="snapTable">
+          <thead>
+            <tr>
+              <th>Time (IST)</th>
+              <th>Total Views</th>
+              <th>Gain</th>
+            </tr>
+          </thead>
+          <tbody id="tableBody">
+            <tr><td colspan="3">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
 
       <div class="note">
-        Data updates every 30 minutes. Time shown in Indian Standard Time (IST).
+        Use the day selector to view daily aggregates or drill down into snapshots for a particular day.
       </div>
     </div>
   </div>
@@ -152,33 +249,110 @@
     const totalEl = document.getElementById("totalViews");
     const lastUpdateEl = document.getElementById("lastUpdate");
     const tableBody = document.getElementById("tableBody");
+    const dailyBody = document.getElementById("dailyBody");
+    const daySelect = document.getElementById("daySelect");
     const errorEl = document.getElementById("error");
+    const dailyView = document.getElementById("dailyView");
+    const daySnapshots = document.getElementById("daySnapshots");
 
     function formatIST(dateStr) {
       const d = new Date(dateStr);
       return d.toLocaleString("en-IN", {
         timeZone: "Asia/Kolkata",
-        hour12: true
+        hour12: true,
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit"
       });
     }
 
+    function formatDateOnly(dateStr) {
+      // show YYYY-MM-DD
+      const d = new Date(dateStr + "T00:00:00+05:30");
+      return d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+    }
+
     async function loadTotal() {
-      const res = await fetch("/total");
-      const data = await res.json();
-      if (data.total_views !== null) {
-        totalEl.innerText = Number(data.total_views).toLocaleString();
-      } else {
+      try {
+        const res = await fetch("/total");
+        const data = await res.json();
+        if (data.total_views !== null) {
+          totalEl.innerText = Number(data.total_views).toLocaleString();
+        } else {
+          totalEl.innerText = "—";
+        }
+      } catch (e) {
         totalEl.innerText = "—";
       }
     }
 
-    async function loadHistory() {
+    async function loadDaily() {
+      dailyBody.innerHTML = "<tr><td colspan='5'>Loading…</td></tr>";
       try {
-        const res = await fetch("/history");
+        const res = await fetch("/daily");
         const data = await res.json();
 
         if (!Array.isArray(data) || data.length === 0) {
-          tableBody.innerHTML = "<tr><td colspan='3'>No data yet</td></tr>";
+          dailyBody.innerHTML = "<tr><td colspan='5'>No daily data yet</td></tr>";
+          return;
+        }
+
+        dailyBody.innerHTML = "";
+        daySelect.innerHTML = "<option value=''>— Daily summary —</option>";
+
+        data.forEach(row => {
+          const tr = document.createElement("tr");
+
+          const dayTd = document.createElement("td");
+          dayTd.innerText = row.day;
+
+          const firstTd = document.createElement("td");
+          firstTd.className = "num";
+          firstTd.innerText = Number(row.first_total).toLocaleString();
+
+          const lastTd = document.createElement("td");
+          lastTd.className = "num";
+          lastTd.innerText = Number(row.last_total).toLocaleString();
+
+          const gainTd = document.createElement("td");
+          gainTd.className = "num";
+          gainTd.innerText = (row.daily_gain >= 0 ? "+" : "") + Number(row.daily_gain).toLocaleString();
+          gainTd.classList.add(row.daily_gain >= 0 ? "gain-positive" : "gain-negative");
+
+          const snapsTd = document.createElement("td");
+          snapsTd.innerText = row.snaps;
+
+          tr.appendChild(dayTd);
+          tr.appendChild(firstTd);
+          tr.appendChild(lastTd);
+          tr.appendChild(gainTd);
+          tr.appendChild(snapsTd);
+          dailyBody.appendChild(tr);
+
+          // populate select (most recent first)
+          const opt = document.createElement("option");
+          opt.value = row.day;
+          opt.innerText = row.day + " (" + row.snaps + " snaps)";
+          daySelect.appendChild(opt);
+        });
+
+      } catch (e) {
+        dailyBody.innerHTML = "<tr><td colspan='5'>Failed to load daily data</td></tr>";
+      }
+    }
+
+    async function loadHistory(day) {
+      tableBody.innerHTML = "<tr><td colspan='3'>Loading…</td></tr>";
+      try {
+        const url = day ? `/history?day=${day}` : "/history";
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (!Array.isArray(data) || data.length === 0) {
+          tableBody.innerHTML = "<tr><td colspan='3'>No snapshots for this day</td></tr>";
           return;
         }
 
@@ -209,23 +383,72 @@
           tableBody.appendChild(tr);
         });
 
-        lastUpdateEl.innerText =
-          "Last snapshot: " + formatIST(data[0].ts);
+        lastUpdateEl.innerText = "Last snapshot: " + formatIST(data[0].ts);
 
       } catch (e) {
-        errorEl.innerText = "Failed to load data";
-        errorEl.style.display = "block";
+        tableBody.innerHTML = "<tr><td colspan='3'>Failed to load snapshots</td></tr>";
       }
     }
 
     async function refreshAll() {
       errorEl.style.display = "none";
       await loadTotal();
-      await loadHistory();
+      await loadDaily();
+      // default show daily summary
+      showDaily();
     }
 
+    function showDaily() {
+      dailyView.style.display = "block";
+      daySnapshots.style.display = "none";
+    }
+
+    function showDaySnapshots() {
+      dailyView.style.display = "none";
+      daySnapshots.style.display = "block";
+    }
+
+    async function loadForDay() {
+      const selected = daySelect.value;
+      if (!selected) {
+        // show daily summary again
+        showDaily();
+        return;
+      }
+      // show snapshots for the selected day
+      showDaySnapshots();
+      await loadHistory(selected);
+    }
+
+    async function triggerSnapshot(){
+      try {
+        const res = await fetch("/snapshot", { method: "POST" });
+        const data = await res.json();
+        if (data.status === "ok") {
+          await refreshAll();
+        } else {
+          errorEl.innerText = "Snapshot returned unexpected response";
+          errorEl.style.display = "block";
+        }
+      } catch (e) {
+        errorEl.innerText = "Snapshot trigger failed";
+        errorEl.style.display = "block";
+      }
+    }
+
+    // initial load
     refreshAll();
-    setInterval(loadHistory, 30000);
+
+    // refresh daily summary every 60s and snapshots table every 30s if open
+    setInterval(async () => {
+      await loadTotal();
+      await loadDaily();
+      // if user is viewing a specific day, refresh that snapshots table too
+      if (daySelect.value) {
+        await loadHistory(daySelect.value);
+      }
+    }, 60 * 1000);
+
   </script>
 </body>
 </html>
