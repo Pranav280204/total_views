@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>MrBeast Total Views (IST)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #0f172a;
+      color: #ffffff;
+      margin: 0;
+      padding: 40px;
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: auto;
+    }
+
+    .card {
+      background: #111827;
+      padding: 24px;
+      border-radius: 12px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.4);
+    }
+
+    h1 {
+      margin-top: 0;
+      font-size: 28px;
+    }
+
+    .summary {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+
+    .total {
+      font-size: 38px;
+      color: #38bdf8;
+      font-weight: bold;
+    }
+
+    .last-update {
+      color: #9ca3af;
+      font-size: 14px;
+    }
+
+    button {
+      padding: 8px 14px;
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #1d4ed8;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 18px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+
+    th {
+      color: #9ca3af;
+      font-size: 13px;
+      text-transform: uppercase;
+    }
+
+    td.num {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .gain-positive {
+      color: #22c55e;
+      font-weight: bold;
+    }
+
+    .gain-negative {
+      color: #ef4444;
+      font-weight: bold;
+    }
+
+    .error {
+      color: #ef4444;
+      margin-top: 10px;
+      display: none;
+    }
+
+    .note {
+      margin-top: 10px;
+      color: #9ca3af;
+      font-size: 13px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>MrBeast – Total Views Tracker</h1>
+
+      <div class="summary">
+        <div>
+          <div class="total" id="totalViews">Loading…</div>
+          <div class="last-update" id="lastUpdate">—</div>
+        </div>
+        <div>
+          <button onclick="refreshAll()">Refresh</button>
+        </div>
+      </div>
+
+      <div id="error" class="error"></div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Time (IST)</th>
+            <th>Total Views</th>
+            <th>Gain</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody">
+          <tr>
+            <td colspan="3">Loading…</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="note">
+        Data updates every 30 minutes. Time shown in Indian Standard Time (IST).
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const totalEl = document.getElementById("totalViews");
+    const lastUpdateEl = document.getElementById("lastUpdate");
+    const tableBody = document.getElementById("tableBody");
+    const errorEl = document.getElementById("error");
+
+    function formatIST(dateStr) {
+      const d = new Date(dateStr);
+      return d.toLocaleString("en-IN", {
+        timeZone: "Asia/Kolkata",
+        hour12: true
+      });
+    }
+
+    async function loadTotal() {
+      const res = await fetch("/total");
+      const data = await res.json();
+      if (data.total_views !== null) {
+        totalEl.innerText = Number(data.total_views).toLocaleString();
+      } else {
+        totalEl.innerText = "—";
+      }
+    }
+
+    async function loadHistory() {
+      try {
+        const res = await fetch("/history");
+        const data = await res.json();
+
+        if (!Array.isArray(data) || data.length === 0) {
+          tableBody.innerHTML = "<tr><td colspan='3'>No data yet</td></tr>";
+          return;
+        }
+
+        tableBody.innerHTML = "";
+        data.forEach(row => {
+          const tr = document.createElement("tr");
+
+          const timeTd = document.createElement("td");
+          timeTd.innerText = formatIST(row.ts);
+
+          const totalTd = document.createElement("td");
+          totalTd.className = "num";
+          totalTd.innerText = Number(row.total_views).toLocaleString();
+
+          const gainTd = document.createElement("td");
+          gainTd.className = "num";
+          if (row.view_gain === null) {
+            gainTd.innerText = "—";
+          } else {
+            const g = Number(row.view_gain);
+            gainTd.innerText = (g >= 0 ? "+" : "") + g.toLocaleString();
+            gainTd.classList.add(g >= 0 ? "gain-positive" : "gain-negative");
+          }
+
+          tr.appendChild(timeTd);
+          tr.appendChild(totalTd);
+          tr.appendChild(gainTd);
+          tableBody.appendChild(tr);
+        });
+
+        lastUpdateEl.innerText =
+          "Last snapshot: " + formatIST(data[0].ts);
+
+      } catch (e) {
+        errorEl.innerText = "Failed to load data";
+        errorEl.style.display = "block";
+      }
+    }
+
+    async function refreshAll() {
+      errorEl.style.display = "none";
+      await loadTotal();
+      await loadHistory();
+    }
+
+    refreshAll();
+    setInterval(loadHistory, 30000);
+  </script>
+</body>
+</html>

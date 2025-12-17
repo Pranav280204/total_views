@@ -1,0 +1,6 @@
+flask
+requests
+gunicorn
+sqlalchemy
+psycopg2-binary
+tzdata
