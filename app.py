@@ -37,7 +37,7 @@ SNAPSHOT_TOKEN = os.environ.get("SNAPSHOT_TOKEN")
 
 # fetch every 5 minutes on :00, :05, :10, ...
 SNAPSHOT_INTERVAL_SECONDS = int(
-    os.environ.get("SNAPSHOT_INTERVAL_SECONDS", 5 * 60)
+    os.environ.get("SNAPSHOT_INTERVAL_SECONDS", 10 * 60)
 )
 
 DISABLE_INTERNAL_SCHEDULER = os.environ.get(
@@ -196,34 +196,37 @@ def take_snapshot():
 
 
 # ---------------- SCHEDULER (align to exact :00/:05/:10 ...) ----------------
-def seconds_until_next_multiple_of_five(now_dt):
-    # now_dt is an aware datetime in IST
-    next_minute = (ceil(now_dt.minute / 5) * 5) % 60
-    # compute the next time which has minute %5 == 0 and second == 0
-    # if now is exactly on a multiple and second == 0 -> run immediately
-    if now_dt.minute % 5 == 0 and now_dt.second == 0:
+def seconds_until_next_multiple_of_ten(now_dt):
+    # Run exactly at minute % 10 == 0 and second == 0
+    if now_dt.minute % 10 == 0 and now_dt.second == 0:
         return 0
-    # otherwise compute delta to next multiple
-    minutes_to_add = (5 - (now_dt.minute % 5))
-    next_dt = (now_dt + timedelta(minutes=minutes_to_add)).replace(second=0, microsecond=0)
+
+    minutes_to_add = 10 - (now_dt.minute % 10)
+    next_dt = (now_dt + timedelta(minutes=minutes_to_add)).replace(
+        second=0, microsecond=0
+    )
+
     delta = (next_dt - now_dt).total_seconds()
-    if delta < 0:
-        delta = 0
-    return int(delta)
+    return max(0, int(delta))
+
 
 
 def scheduler_loop():
-    app.logger.info("Scheduler started (5-minute aligned interval)")
+    app.logger.info("Scheduler started (10-minute aligned interval)")
     while True:
         now_ist = datetime.now(IST)
-        wait = seconds_until_next_multiple_of_five(now_ist)
+        wait = seconds_until_next_multiple_of_ten(now_ist)
+
         if wait > 0:
-            app.logger.info("Sleeping %ds until next aligned snapshot (next multiple of 5 min).", wait)
+            app.logger.info(
+                "Sleeping %ds until next aligned snapshot (:00/:10/:20/:30/:40/:50 IST)",
+                wait
+            )
             time.sleep(wait)
-        # take snapshot exactly on the aligned minute
+
         take_snapshot()
-        # then sleep full interval (5 minutes) until next aligned minute
         time.sleep(SNAPSHOT_INTERVAL_SECONDS)
+
 # -------------------------------------------
 
 
