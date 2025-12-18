@@ -1,5 +1,10 @@
 # app.py
-# MrBeast Total Views Tracker (with target feature)
+# MrBeast Total Views Tracker
+# - Stores snapshots in PostgreSQL
+# - Updates every 10 minutes on exact :00, :10, :20, ...
+# - Uses Indian Standard Time (IST)
+# - Exposes total, history (per-day), daily aggregates, target, required
+
 import os
 import time
 import threading
@@ -9,7 +14,6 @@ from datetime import datetime, timedelta, timezone
 
 from flask import Flask, jsonify, render_template, request
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
 
 # ---------------- TIMEZONE (IST, WINDOWS SAFE) ----------------
 try:
@@ -56,7 +60,6 @@ def init_db():
         return
 
     with engine.begin() as conn:
-        # snapshots table (existing)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS view_snapshots (
                 id SERIAL PRIMARY KEY,
@@ -65,7 +68,6 @@ def init_db():
                 view_gain BIGINT
             );
         """))
-        # targets table (new) - we'll keep history; latest is used
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS targets (
                 id SERIAL PRIMARY KEY,
@@ -89,7 +91,10 @@ def get_uploads_playlist_id(channel_id: str) -> str:
         timeout=20
     )
     r.raise_for_status()
-    return r.json()["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+    items = r.json().get("items", [])
+    if not items:
+        raise RuntimeError("channel not found or no contentDetails")
+    return items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
 
 
 def get_all_video_ids(playlist_id: str):
@@ -146,6 +151,7 @@ def get_total_views(video_ids):
 
 # ---------------- SNAPSHOT LOGIC ----------------
 def take_snapshot():
+    # preserve existing tracking: if DB or API missing, do nothing
     if not YOUTUBE_API_KEY or engine is None:
         app.logger.debug("Skipping snapshot: missing API key or DB.")
         return
@@ -331,11 +337,6 @@ def snapshot():
 # ---------------- TARGET endpoints ----------------
 @app.route("/target", methods=["GET", "POST"])
 def target():
-    """
-    POST JSON: { "target_total": 107000000000, "target_ts": "2026-01-31T22:30" }
-       - target_ts without timezone is interpreted as IST.
-    GET returns latest target or null.
-    """
     if engine is None:
         return jsonify({"error": "DB not configured"}), 400
 
@@ -359,7 +360,6 @@ def target():
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=IST)
             else:
-                # convert to IST
                 dt = dt.astimezone(IST)
 
             with engine.begin() as conn:
@@ -383,25 +383,13 @@ def target():
 
     if not row:
         return jsonify(None)
-    return jsonify({"target_total": int(row[0]), "target_ts": row[1].isoformat()})
+    # row[1] may be datetime with tz; ensure isoformat
+    ts = row[1].isoformat() if hasattr(row[1], "isoformat") else str(row[1])
+    return jsonify({"target_total": int(row[0]), "target_ts": ts})
 
 
 @app.route("/required")
 def required():
-    """
-    Returns computed required rates using latest snapshot and latest target.
-    {
-      "target_total": ...,
-      "target_ts": "...",
-      "current_total": ...,
-      "seconds_remaining": ...,
-      "intervals_remaining_10min": ...,
-      "per_10min_required": ...,
-      "days_remaining": ...,
-      "per_day_required": ...,
-      "status": "ok" | "passed" | "missing_target" | "no_snapshot"
-    }
-    """
     if engine is None:
         return jsonify({"error": "DB not configured"}), 400
 
@@ -428,7 +416,20 @@ def required():
 
     current_total = int(snap[0])
     target_total = int(target[0])
-    target_ts = target[1].astimezone(IST) if hasattr(target[1], "astimezone") else target[1]
+    target_ts = target[1]
+    # ensure target_ts is aware in IST
+    if hasattr(target_ts, "astimezone"):
+        target_ts = target_ts.astimezone(IST)
+    else:
+        # if string, parse
+        try:
+            target_ts = datetime.fromisoformat(str(target_ts))
+            if target_ts.tzinfo is None:
+                target_ts = target_ts.replace(tzinfo=IST)
+            else:
+                target_ts = target_ts.astimezone(IST)
+        except Exception:
+            target_ts = datetime.now(IST)
 
     now_ist = datetime.now(IST)
     seconds_remaining = (target_ts - now_ist).total_seconds()
