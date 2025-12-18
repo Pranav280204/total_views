@@ -1,9 +1,10 @@
 # app.py
 # MrBeast Total Views Tracker
 # - Stores snapshots in PostgreSQL
-# - Updates every 10 minutes on exact :00, :10, :20, ...
-# - Uses Indian Standard Time (IST)
-# - Exposes total, history (per-day), daily aggregates, target, required
+# - Updates every 10 minutes on exact :00, :10, :20, :30, :40, :50 (IST)
+# - Provides /total, /history?day=YYYY-MM-DD, /daily, /snapshot
+# - Adds hourly gain calculation (1 hour before; +/-5s tolerant then best within 10min)
+# - No "target" feature (removed)
 
 import os
 import time
@@ -66,14 +67,6 @@ def init_db():
                 ts TIMESTAMPTZ NOT NULL,
                 total_views BIGINT NOT NULL,
                 view_gain BIGINT
-            );
-        """))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS targets (
-                id SERIAL PRIMARY KEY,
-                target_total BIGINT NOT NULL,
-                target_ts TIMESTAMPTZ NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             );
         """))
 # ------------------------------------------
@@ -229,6 +222,45 @@ def scheduler_loop():
 # -------------------------------------------
 
 
+# ---------------- HELPERS FOR HOURLY GAIN ----------------
+def find_snapshot_near(conn, target_ts, tolerance_seconds=5, fallback_seconds=600):
+    """
+    Attempt to find a snapshot close to target_ts.
+    1) Search for ts between target_ts - tolerance_seconds and target_ts + tolerance_seconds.
+    2) If not found, search for the nearest snapshot by absolute difference but only accept it
+       if it's within fallback_seconds (default 600s = 10min). Return (total_views, ts, approx_flag).
+    If nothing, return (None, None, False).
+    """
+    # 1) exact +/- tolerance
+    start = target_ts - timedelta(seconds=tolerance_seconds)
+    end = target_ts + timedelta(seconds=tolerance_seconds)
+    row = conn.execute(text("""
+        SELECT total_views, ts
+        FROM view_snapshots
+        WHERE ts BETWEEN :start AND :end
+        ORDER BY abs(EXTRACT(EPOCH FROM ts - :target)) ASC
+        LIMIT 1
+    """), {"start": start, "end": end, "target": target_ts}).fetchone()
+
+    if row:
+        return int(row[0]), row[1], False  # exact (within tolerance)
+
+    # 2) nearest within fallback_seconds
+    row2 = conn.execute(text("""
+        SELECT total_views, ts, abs(EXTRACT(EPOCH FROM ts - :target)) AS diff
+        FROM view_snapshots
+        ORDER BY diff ASC
+        LIMIT 1
+    """), {"target": target_ts}).fetchone()
+
+    if row2:
+        diff = float(row2[2])
+        if diff <= fallback_seconds:
+            return int(row2[0]), row2[1], True  # approximate
+    return None, None, False
+# -----------------------------------------------------
+
+
 # ---------------- ROUTES ----------------
 @app.route("/")
 def home():
@@ -242,17 +274,25 @@ def total():
 
     with engine.connect() as conn:
         row = conn.execute(text("""
-            SELECT total_views
+            SELECT total_views, ts
             FROM view_snapshots
             ORDER BY ts DESC
             LIMIT 1
         """)).fetchone()
 
-    return jsonify({"total_views": row[0] if row else None})
+    if not row:
+        return jsonify({"total_views": None})
+    return jsonify({"total_views": int(row[0]), "ts": row[1].isoformat()})
 
 
 @app.route("/history")
 def history():
+    """
+    Returns recent snapshots or snapshots for a specific day.
+    Query param:
+      - day (optional): YYYY-MM-DD (IST) to filter snapshots for that calendar day in IST
+    Adds hourly_gain and hourly_approx fields for each snapshot.
+    """
     if engine is None:
         return jsonify({"error": "DB not configured"}), 400
 
@@ -273,18 +313,41 @@ def history():
                 LIMIT 100
             """)).fetchall()
 
-    return jsonify([
-        {
-            "ts": r[0].isoformat(),
-            "total_views": int(r[1]),
-            "view_gain": int(r[2]) if r[2] is not None else None
-        }
-        for r in rows
-    ])
+        out = []
+        for r in rows:
+            ts = r[0]
+            tv = int(r[1])
+            vg = int(r[2]) if r[2] is not None else None
+
+            # compute hourly gain: find snapshot approx 1 hour earlier
+            target_ts = ts - timedelta(hours=1)
+            found_tv, found_ts, approx = find_snapshot_near(conn, target_ts, tolerance_seconds=5, fallback_seconds=600)
+            if found_tv is not None:
+                hourly_gain = tv - int(found_tv)
+            else:
+                hourly_gain = None
+
+            out.append({
+                "ts": ts.isoformat(),
+                "total_views": tv,
+                "view_gain": vg,
+                "hourly_gain": int(hourly_gain) if hourly_gain is not None else None,
+                "hourly_approx": bool(approx)
+            })
+
+    return jsonify(out)
 
 
 @app.route("/daily")
 def daily():
+    """
+    Returns day-wise aggregates:
+      - day (YYYY-MM-DD IST)
+      - first_total: total_views at first snapshot of the day (IST)
+      - last_total: total_views at last snapshot of the day (IST)
+      - daily_gain: last_total - first_total
+      - snaps: number of snapshots recorded that day
+    """
     if engine is None:
         return jsonify({"error": "DB not configured"}), 400
 
@@ -330,140 +393,9 @@ def snapshot():
     if SNAPSHOT_TOKEN and token != SNAPSHOT_TOKEN:
         return jsonify({"error": "invalid token"}), 403
 
+    # immediate snapshot run
     take_snapshot()
     return jsonify({"status": "ok"})
-
-
-# ---------------- TARGET endpoints ----------------
-@app.route("/target", methods=["GET", "POST"])
-def target():
-    if engine is None:
-        return jsonify({"error": "DB not configured"}), 400
-
-    if request.method == "POST":
-        data = request.get_json(force=True, silent=True)
-        if not data:
-            return jsonify({"error": "missing json body"}), 400
-
-        try:
-            target_total = int(data.get("target_total"))
-            target_ts_str = data.get("target_ts")
-            if not target_ts_str:
-                return jsonify({"error": "target_ts required"}), 400
-
-            # parse ISO string; if naive (no tz), treat as IST
-            try:
-                dt = datetime.fromisoformat(target_ts_str)
-            except Exception:
-                return jsonify({"error": "invalid datetime format; use YYYY-MM-DDTHH:MM"}), 400
-
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=IST)
-            else:
-                dt = dt.astimezone(IST)
-
-            with engine.begin() as conn:
-                conn.execute(text("""
-                    INSERT INTO targets (target_total, target_ts)
-                    VALUES (:tt, :ts)
-                """), {"tt": target_total, "ts": dt})
-            return jsonify({"status": "ok", "target_total": target_total, "target_ts": dt.isoformat()})
-
-        except ValueError:
-            return jsonify({"error": "invalid target_total"}), 400
-
-    # GET latest target
-    with engine.connect() as conn:
-        row = conn.execute(text("""
-            SELECT target_total, target_ts
-            FROM targets
-            ORDER BY created_at DESC
-            LIMIT 1
-        """)).fetchone()
-
-    if not row:
-        return jsonify(None)
-    # row[1] may be datetime with tz; ensure isoformat
-    ts = row[1].isoformat() if hasattr(row[1], "isoformat") else str(row[1])
-    return jsonify({"target_total": int(row[0]), "target_ts": ts})
-
-
-@app.route("/required")
-def required():
-    if engine is None:
-        return jsonify({"error": "DB not configured"}), 400
-
-    with engine.connect() as conn:
-        snap = conn.execute(text("""
-            SELECT total_views, ts
-            FROM view_snapshots
-            ORDER BY ts DESC
-            LIMIT 1
-        """)).fetchone()
-
-        target = conn.execute(text("""
-            SELECT target_total, target_ts
-            FROM targets
-            ORDER BY created_at DESC
-            LIMIT 1
-        """)).fetchone()
-
-    if not target:
-        return jsonify({"status": "missing_target", "message": "No target set yet."})
-
-    if not snap:
-        return jsonify({"status": "no_snapshot", "message": "No snapshots available yet."})
-
-    current_total = int(snap[0])
-    target_total = int(target[0])
-    target_ts = target[1]
-    # ensure target_ts is aware in IST
-    if hasattr(target_ts, "astimezone"):
-        target_ts = target_ts.astimezone(IST)
-    else:
-        # if string, parse
-        try:
-            target_ts = datetime.fromisoformat(str(target_ts))
-            if target_ts.tzinfo is None:
-                target_ts = target_ts.replace(tzinfo=IST)
-            else:
-                target_ts = target_ts.astimezone(IST)
-        except Exception:
-            target_ts = datetime.now(IST)
-
-    now_ist = datetime.now(IST)
-    seconds_remaining = (target_ts - now_ist).total_seconds()
-
-    remaining_needed = target_total - current_total
-
-    if seconds_remaining <= 0:
-        return jsonify({
-            "status": "passed" if remaining_needed <= 0 else "deadline_passed",
-            "target_total": target_total,
-            "target_ts": target_ts.isoformat(),
-            "current_total": current_total,
-            "remaining_needed": remaining_needed,
-            "seconds_remaining": int(seconds_remaining)
-        })
-
-    intervals_remaining = max(1, math.ceil(seconds_remaining / (10 * 60)))
-    days_remaining = max(1, math.ceil(seconds_remaining / 86400.0))
-
-    per_10min = math.ceil(remaining_needed / intervals_remaining) if remaining_needed > 0 else 0
-    per_day = math.ceil(remaining_needed / days_remaining) if remaining_needed > 0 else 0
-
-    return jsonify({
-        "status": "ok",
-        "target_total": target_total,
-        "target_ts": target_ts.isoformat(),
-        "current_total": current_total,
-        "remaining_needed": remaining_needed,
-        "seconds_remaining": int(seconds_remaining),
-        "intervals_remaining_10min": int(intervals_remaining),
-        "per_10min_required": int(per_10min),
-        "days_remaining": int(days_remaining),
-        "per_day_required": int(per_day)
-    })
 # ----------------------------------------
 
 # ---------------- STARTUP ----------------
