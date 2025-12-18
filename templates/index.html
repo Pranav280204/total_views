@@ -43,6 +43,7 @@
     @media (max-width:700px){.summary{flex-direction:column;align-items:flex-start;gap:8px}.controls{width:100%;justify-content:flex-start;}}
   </style>
 </head>
+
 <body>
   <div class="container">
     <div class="card">
@@ -65,10 +66,10 @@
             <div class="last-update" id="lastUpdate">—</div>
           </div>
 
-          <div style="min-width:260px;">
+          <div style="min-width:240px;">
             <label class="muted" style="display:block;margin-bottom:6px;">Set target (total views) &amp; target date/time (IST)</label>
             <div class="target-box">
-              <input id="targetInput" type="number" placeholder="Target total views (e.g. 107000000000)" style="min-width:220px;">
+              <input id="targetInput" type="number" placeholder="Target total views">
               <input id="targetTimeInput" type="datetime-local">
               <button onclick="setTarget()">Set Target</button>
             </div>
@@ -97,6 +98,17 @@
         </div>
 
         <div style="flex:1;min-width:320px;">
+          <div style="display:flex;gap:12px;align-items:center;justify-content:space-between;">
+            <div class="muted">Daily summary (most recent)</div>
+            <div>
+              <label class="muted" style="margin-right:8px;">View day:</label>
+              <select id="daySelect" onchange="loadForDay()">
+                <option value="">— Select day —</option>
+              </select>
+              <button onclick="clearDay()">All</button>
+            </div>
+          </div>
+
           <div id="dailyView">
             <table id="dailyTable">
               <thead>
@@ -113,11 +125,27 @@
               </tbody>
             </table>
           </div>
+
+          <div id="daySnapshots" style="display:none;margin-top:12px;">
+            <table id="snapTable">
+              <thead>
+                <tr>
+                  <th>Time (IST)</th>
+                  <th>Total Views</th>
+                  <th>Gain</th>
+                </tr>
+              </thead>
+              <tbody id="tableBody">
+                <tr><td colspan="3">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+
         </div>
       </div>
 
       <div style="margin-top:12px;">
-        <div class="note">Use the form above to set a numeric target and a target date/time (IST). Required rates auto-update with every refresh.</div>
+        <div class="note">Use the day selector to view daily aggregates or drill down into snapshots for a particular day. Required rates auto-update with each refresh.</div>
       </div>
     </div>
   </div>
@@ -132,6 +160,9 @@
     const targetInput = document.getElementById("targetInput");
     const targetTimeInput = document.getElementById("targetTimeInput");
     const dailyBody = document.getElementById("dailyBody");
+    const daySelect = document.getElementById("daySelect");
+    const tableBody = document.getElementById("tableBody");
+    const daySnapshots = document.getElementById("daySnapshots");
     const errorEl = document.getElementById("error");
 
     function formatDuration(seconds){
@@ -145,6 +176,20 @@
       if (mins) parts.push(mins + "m");
       if (secs && parts.length === 0) parts.push(secs + "s");
       return parts.join(" ");
+    }
+
+    function formatIST(dateStr) {
+      const d = new Date(dateStr);
+      return d.toLocaleString("en-IN", {
+        timeZone: "Asia/Kolkata",
+        hour12: true,
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit"
+      });
     }
 
     async function loadTotal(){
@@ -171,6 +216,7 @@
           return;
         }
         dailyBody.innerHTML = "";
+        daySelect.innerHTML = "<option value=''>— Select day —</option>";
         data.forEach(row => {
           const tr = document.createElement("tr");
           tr.innerHTML = `<td>${row.day}</td>
@@ -179,9 +225,60 @@
                           <td class="num ${row.daily_gain>=0?'gain-positive':'gain-negative'}">${(row.daily_gain>=0?'+':'')+Number(row.daily_gain).toLocaleString()}</td>
                           <td>${row.snaps}</td>`;
           dailyBody.appendChild(tr);
+
+          const opt = document.createElement("option");
+          opt.value = row.day;
+          opt.innerText = row.day + " (" + row.snaps + ")";
+          daySelect.appendChild(opt);
         });
       } catch (e) {
         dailyBody.innerHTML = "<tr><td colspan='5'>Failed to load daily data</td></tr>";
+      }
+    }
+
+    async function loadHistory(day) {
+      tableBody.innerHTML = "<tr><td colspan='3'>Loading…</td></tr>";
+      try {
+        const url = day ? `/history?day=${day}` : "/history";
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (!Array.isArray(data) || data.length === 0) {
+          tableBody.innerHTML = "<tr><td colspan='3'>No snapshots for this day</td></tr>";
+          return;
+        }
+
+        tableBody.innerHTML = "";
+        data.forEach(row => {
+          const tr = document.createElement("tr");
+
+          const timeTd = document.createElement("td");
+          timeTd.innerText = formatIST(row.ts);
+
+          const totalTd = document.createElement("td");
+          totalTd.className = "num";
+          totalTd.innerText = Number(row.total_views).toLocaleString();
+
+          const gainTd = document.createElement("td");
+          gainTd.className = "num";
+          if (row.view_gain === null) {
+            gainTd.innerText = "—";
+          } else {
+            const g = Number(row.view_gain);
+            gainTd.innerText = (g >= 0 ? "+" : "") + g.toLocaleString();
+            gainTd.classList.add(g >= 0 ? "gain-positive" : "gain-negative");
+          }
+
+          tr.appendChild(timeTd);
+          tr.appendChild(totalTd);
+          tr.appendChild(gainTd);
+          tableBody.appendChild(tr);
+        });
+
+        lastUpdateEl.innerText = "Last snapshot: " + formatIST(data[0].ts);
+
+      } catch (e) {
+        tableBody.innerHTML = "<tr><td colspan='3'>Failed to load snapshots</td></tr>";
       }
     }
 
@@ -191,17 +288,13 @@
         const data = await res.json();
         if (data) {
           targetInput.value = data.target_total;
-          // populate datetime-local input from ISO (convert to local representation without tz)
           const dt = new Date(data.target_ts);
-          // construct YYYY-MM-DDTHH:MM
           const pad = v => String(v).padStart(2,'0');
           const y = dt.getFullYear(), m = pad(dt.getMonth()+1), d = pad(dt.getDate());
           const hh = pad(dt.getHours()), mm = pad(dt.getMinutes());
           targetTimeInput.value = `${y}-${m}-${d}T${hh}:${mm}`;
         }
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
     }
 
     async function setTarget(){
@@ -291,10 +384,38 @@
       await loadDaily();
       await loadTarget();
       await loadRequired();
+      // if day is selected, refresh snapshots table
+      if (daySelect.value) {
+        showDaySnapshots();
+        await loadHistory(daySelect.value);
+      } else {
+        hideDaySnapshots();
+      }
     }
 
+    function showDaySnapshots(){
+      daySnapshots.style.display = "block";
+    }
+    function hideDaySnapshots(){
+      daySnapshots.style.display = "none";
+    }
+
+    async function loadForDay(){
+      const selected = daySelect.value;
+      if (!selected) {
+        hideDaySnapshots();
+        return;
+      }
+      showDaySnapshots();
+      await loadHistory(selected);
+    }
+    function clearDay(){
+      daySelect.value = "";
+      hideDaySnapshots();
+    }
+
+    // initial load
     refreshAll();
-    // periodic refresh
     setInterval(refreshAll, 60 * 1000);
   </script>
 </body>
