@@ -3,8 +3,8 @@
 # - Stores snapshots in PostgreSQL
 # - Updates every 10 minutes on exact :00, :10, :20, :30, :40, :50 (IST)
 # - Provides /total, /history?day=YYYY-MM-DD, /daily, /snapshot
-# - Adds hourly gain calculation (1 hour before; +/-5s tolerant then best within 10min)
-# - No "target" feature (removed)
+# - Adds hourly gain calculation (1 hour before; ±5s or nearest within 10min)
+# - Adds day_gain for each snapshot row (= total_views - first_total_of_that_day)
 
 import os
 import time
@@ -291,7 +291,8 @@ def history():
     Returns recent snapshots or snapshots for a specific day.
     Query param:
       - day (optional): YYYY-MM-DD (IST) to filter snapshots for that calendar day in IST
-    Adds hourly_gain and hourly_approx fields for each snapshot.
+    Each returned row includes:
+      - ts, total_views, view_gain, hourly_gain, hourly_approx, day_gain (gain since day's first snapshot)
     """
     if engine is None:
         return jsonify({"error": "DB not configured"}), 400
@@ -305,6 +306,15 @@ def history():
                 WHERE ((ts AT TIME ZONE 'Asia/Kolkata')::date) = :day
                 ORDER BY ts DESC
             """), {"day": day}).fetchall()
+            # fetch first_total for this day
+            first_row = conn.execute(text("""
+                SELECT total_views
+                FROM view_snapshots
+                WHERE ((ts AT TIME ZONE 'Asia/Kolkata')::date) = :day
+                ORDER BY ts ASC
+                LIMIT 1
+            """), {"day": day}).fetchone()
+            first_total_for_day = int(first_row[0]) if first_row else None
         else:
             rows = conn.execute(text("""
                 SELECT ts, total_views, view_gain
@@ -312,6 +322,24 @@ def history():
                 ORDER BY ts DESC
                 LIMIT 100
             """)).fetchall()
+            # determine distinct days in these rows and fetch first_total per day
+            days = set()
+            for r in rows:
+                ts_ = r[0]
+                d = (ts_.astimezone(IST).date()) if hasattr(ts_, "astimezone") else (ts_.date())
+                days.add(d.isoformat())
+            first_totals_map = {}
+            for d in days:
+                fr = conn.execute(text("""
+                    SELECT total_views
+                    FROM view_snapshots
+                    WHERE ((ts AT TIME ZONE 'Asia/Kolkata')::date) = :day
+                    ORDER BY ts ASC
+                    LIMIT 1
+                """), {"day": d}).fetchone()
+                if fr:
+                    first_totals_map[d] = int(fr[0])
+            first_total_for_day = None  # not used for non-day mode
 
         out = []
         for r in rows:
@@ -327,12 +355,26 @@ def history():
             else:
                 hourly_gain = None
 
+            # compute day_gain: tv - first_total_of_that_day
+            day_of_row = (ts.astimezone(IST).date()).isoformat() if hasattr(ts, "astimezone") else ts.date().isoformat()
+            if day:
+                # we already have first_total_for_day
+                first_total = first_total_for_day
+            else:
+                first_total = first_totals_map.get(day_of_row)
+
+            if first_total is not None:
+                day_gain = tv - first_total
+            else:
+                day_gain = None
+
             out.append({
                 "ts": ts.isoformat(),
                 "total_views": tv,
                 "view_gain": vg,
                 "hourly_gain": int(hourly_gain) if hourly_gain is not None else None,
-                "hourly_approx": bool(approx)
+                "hourly_approx": bool(approx),
+                "day_gain": int(day_gain) if day_gain is not None else None
             })
 
     return jsonify(out)
@@ -343,10 +385,7 @@ def daily():
     """
     Returns day-wise aggregates:
       - day (YYYY-MM-DD IST)
-      - first_total: total_views at first snapshot of the day (IST)
-      - last_total: total_views at last snapshot of the day (IST)
-      - daily_gain: last_total - first_total
-      - snaps: number of snapshots recorded that day
+      - first_total, last_total, daily_gain, snaps
     """
     if engine is None:
         return jsonify({"error": "DB not configured"}), 400
