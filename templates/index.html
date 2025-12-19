@@ -41,6 +41,11 @@
     .top-row{display:flex;gap:12px;align-items:center;}
     .small{font-size:13px;color:#444;}
     #daySnapshots { max-height: 380px; overflow: auto; border-radius: 6px; }
+    .metrics { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .metric { background:#fff; padding:10px; border-radius:8px; border:1px solid rgba(0,0,0,0.04); min-width:160px; }
+    .metric .label { font-size:12px; color:#666; }
+    .metric .value { font-weight:700; font-size:16px; margin-top:6px; }
+    .target-box{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#fff;padding:8px;border-radius:8px;border:1px solid rgba(0,0,0,0.04);}
     @media (max-width:700px){.summary{flex-direction:column;align-items:flex-start;gap:8px}.controls{width:100%;justify-content:flex-start}}
   </style>
 </head>
@@ -79,12 +84,42 @@
           </div>
         </div>
 
-        <div class="muted" id="infoRight">Snapshots stored every 10 minutes (aligned)</div>
+        <div style="text-align:right;">
+          <div class="target-box" id="targetUI">
+            <input id="targetInput" type="number" placeholder="Target total (e.g. 107000000000)" style="min-width:200px;">
+            <input id="targetTimeInput" type="datetime-local" title="Select target date/time (IST)">
+            <button onclick="setTarget()">Set</button>
+            <button onclick="clearTarget()">Clear</button>
+          </div>
+
+          <div style="margin-top:8px;">
+            <div class="muted small" id="currentTargetText">No target set</div>
+          </div>
+        </div>
       </div>
 
-      <div id="error" style="color:#ef4444;display:none;margin-bottom:10px;"></div>
+      <div style="margin-top:12px;" class="metrics">
+        <div class="metric">
+          <div class="label">Required / 10-min</div>
+          <div class="value" id="req10">—</div>
+        </div>
+        <div class="metric">
+          <div class="label">Required / day</div>
+          <div class="value" id="reqDay">—</div>
+        </div>
+        <div class="metric">
+          <div class="label">Remaining needed</div>
+          <div class="value" id="remNeed">—</div>
+        </div>
+        <div class="metric">
+          <div class="label">Time remaining</div>
+          <div class="value" id="timeRem">—</div>
+        </div>
+      </div>
 
-      <div style="display:flex;gap:18px;flex-wrap:wrap;">
+      <div id="error" style="color:#ef4444;display:none;margin-top:10px;"></div>
+
+      <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:14px;">
         <div style="flex:1;min-width:320px;">
           <div style="display:flex;gap:12px;align-items:center;justify-content:space-between;">
             <div class="muted">Daily summary (most recent)</div>
@@ -136,7 +171,7 @@
       </div>
 
       <div style="margin-top:12px;">
-        <div class="note">Hourly Gain = (current snapshot) − (snapshot 1 hour earlier). "Day Gain" = (current snapshot) − (first snapshot of the same day). If exact 1-hour-prior snapshot isn't found, the server looks ±5s, then the nearest snapshot within 10 minutes and marks it approximate (*).</div>
+        <div class="note">Hourly Gain = (current snapshot) − (snapshot 1 hour earlier). "Day Gain" = (current snapshot) − (first snapshot of the same day). If exact 1-hour-prior snapshot isn't found, the server looks ±5s, then nearest within 10 minutes and marks it approximate (*).</div>
       </div>
     </div>
   </div>
@@ -151,7 +186,16 @@
     const snapHint = document.getElementById("snapHint");
     const errorEl = document.getElementById("error");
 
-    // Track latest snapshot timestamp we know about
+    const req10El = document.getElementById("req10");
+    const reqDayEl = document.getElementById("reqDay");
+    const remNeedEl = document.getElementById("remNeed");
+    const timeRemEl = document.getElementById("timeRem");
+
+    const targetInput = document.getElementById("targetInput");
+    const targetTimeInput = document.getElementById("targetTimeInput");
+    const currentTargetText = document.getElementById("currentTargetText");
+
+    // state
     let lastSnapshotTs = null;
     let dailyLoadedOnce = false;
     let historyLoadedOnce = false;
@@ -170,12 +214,141 @@
       });
     }
 
+    function formatDuration(seconds){
+      if (seconds <= 0) return "0s";
+      const days = Math.floor(seconds / 86400); seconds %= 86400;
+      const hours = Math.floor(seconds / 3600); seconds %= 3600;
+      const mins = Math.floor(seconds / 60); const secs = Math.floor(seconds % 60);
+      let parts = [];
+      if (days) parts.push(days + "d");
+      if (hours) parts.push(hours + "h");
+      if (mins) parts.push(mins + "m");
+      if (secs && parts.length === 0) parts.push(secs + "s");
+      return parts.join(" ");
+    }
+
     function preserveScrollAndUpdate(containerEl, updateFn) {
       const scrollTop = containerEl.scrollTop;
       updateFn();
       setTimeout(() => { containerEl.scrollTop = scrollTop; }, 10);
     }
 
+    // -- Target API calls --
+    async function loadTarget() {
+      try {
+        const res = await fetch("/target");
+        const data = await res.json();
+        if (!data) {
+          currentTargetText.innerText = "No target set";
+          targetInput.value = "";
+          targetTimeInput.value = "";
+          updateRequiredUI(null);
+          return;
+        }
+        targetInput.value = data.target_total;
+        // convert ISO to datetime-local format YYYY-MM-DDTHH:MM
+        const dt = new Date(data.target_ts);
+        const pad = v => String(v).padStart(2, "0");
+        const y = dt.getFullYear(), m = pad(dt.getMonth()+1), d = pad(dt.getDate());
+        const hh = pad(dt.getHours()), mm = pad(dt.getMinutes());
+        targetTimeInput.value = `${y}-${m}-${d}T${hh}:${mm}`;
+        currentTargetText.innerText = "Target: " + Number(data.target_total).toLocaleString() + " by " + formatIST(data.target_ts);
+        // load required immediately
+        await loadRequired();
+      } catch (e) {
+        console.error("loadTarget failed", e);
+      }
+    }
+
+    async function setTarget() {
+      errorEl.style.display = "none";
+      const total = targetInput.value;
+      const ts = targetTimeInput.value;
+      if (!total || !ts) {
+        errorEl.innerText = "Provide both target total and target date/time.";
+        errorEl.style.display = "block";
+        return;
+      }
+      try {
+        const res = await fetch("/target", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ target_total: Number(total), target_ts: ts })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          await loadTarget();
+        } else {
+          errorEl.innerText = data.error || JSON.stringify(data);
+          errorEl.style.display = "block";
+        }
+      } catch (e) {
+        errorEl.innerText = "Failed to set target";
+        errorEl.style.display = "block";
+      }
+    }
+
+    async function clearTarget() {
+      try {
+        const res = await fetch("/target", { method: "DELETE" });
+        if (!res.ok) throw new Error("delete failed");
+        targetInput.value = "";
+        targetTimeInput.value = "";
+        currentTargetText.innerText = "No target set";
+        updateRequiredUI(null);
+      } catch (e) {
+        console.error("clearTarget failed", e);
+      }
+    }
+
+    // -- Required calculation (GET /required) --
+    function updateRequiredUI(data) {
+      if (!data || data.status === "missing_target") {
+        req10El.innerText = "No target";
+        reqDayEl.innerText = "No target";
+        remNeedEl.innerText = "—";
+        timeRemEl.innerText = "—";
+        return;
+      }
+      if (data.status === "no_snapshot") {
+        req10El.innerText = "No snapshot";
+        reqDayEl.innerText = "No snapshot";
+        remNeedEl.innerText = "—";
+        timeRemEl.innerText = "—";
+        return;
+      }
+      if (data.status === "passed") {
+        req10El.innerText = "Target reached ✓";
+        reqDayEl.innerText = "Target reached ✓";
+        remNeedEl.innerText = "0";
+        timeRemEl.innerText = "—";
+        return;
+      }
+      if (data.status === "deadline_passed") {
+        req10El.innerText = "Deadline passed";
+        reqDayEl.innerText = "Deadline passed";
+        remNeedEl.innerText = Number(data.remaining_needed).toLocaleString();
+        timeRemEl.innerText = "0s";
+        return;
+      }
+      // ok
+      req10El.innerText = Number(data.per_10min_required).toLocaleString();
+      reqDayEl.innerText = Number(data.per_day_required).toLocaleString();
+      remNeedEl.innerText = Number(data.remaining_needed).toLocaleString();
+      timeRemEl.innerText = formatDuration(data.seconds_remaining);
+    }
+
+    async function loadRequired() {
+      try {
+        const res = await fetch("/required");
+        const data = await res.json();
+        updateRequiredUI(data);
+      } catch (e) {
+        console.error("loadRequired failed", e);
+      }
+    }
+
+    // -- existing data loaders (daily, history, total) --
     async function fetchTotalAndMaybeUpdate() {
       try {
         const res = await fetch("/total");
@@ -190,13 +363,15 @@
           lastUpdateEl.innerText = "—";
         }
 
-        // if this is the first time, or snapshot ts changed since last fetch -> refresh daily/history
+        // if snapshot changed, update heavy endpoints and required
         if (!lastSnapshotTs || (ts && ts !== lastSnapshotTs)) {
           lastSnapshotTs = ts;
           await loadDaily(false);
           if (daySelect.value) {
             await loadHistoryForDay(daySelect.value, false);
           }
+          // update required if target present
+          await loadRequired();
         }
       } catch (e) {
         console.error("fetchTotal failed", e);
@@ -210,6 +385,7 @@
       tableBody.innerHTML = "<tr><td colspan='5'>Loading…</td></tr>";
       lastSnapshotTs = null; // force reload
       await fetchTotalAndMaybeUpdate();
+      await loadTarget(); // also update target UI
     }
 
     async function loadDaily(showLoading = true) {
@@ -356,14 +532,14 @@
           setTimeout(() => {
             try {
               const rows = tableBody.querySelectorAll("tr");
-              const visibleCount = 2; // show ~20 minutes => 2 snapshots
+              const visibleCount = 2;
               if (rows.length > visibleCount) {
                 const targetRow = rows[visibleCount - 1];
                 daySnapshots.scrollTop = targetRow.offsetTop - 8;
               } else {
                 daySnapshots.scrollTop = 0;
               }
-            } catch (e) { /* ignore */ }
+            } catch (e) {}
           }, 40);
         }
 
@@ -409,7 +585,7 @@
       }
     }
 
-    // Initial load + polling
+    // initial load + polling
     (async () => {
       totalEl.innerText = "Loading…";
       lastUpdateEl.innerText = "—";
@@ -418,8 +594,9 @@
 
       lastSnapshotTs = null;
       await fetchTotalAndMaybeUpdate();
+      await loadTarget();
 
-      // poll every 60s; only fetch heavy endpoints when snapshot ts changes
+      // poll every 60s; update required & data when snapshot changes
       setInterval(fetchTotalAndMaybeUpdate, 60 * 1000);
     })();
   </script>
