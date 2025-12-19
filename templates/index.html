@@ -55,7 +55,7 @@
         </div>
 
         <div class="controls">
-          <button class="primary" onclick="refreshAll()">Refresh</button>
+          <button class="primary" onclick="manualRefresh()">Refresh</button>
           <button class="ghost" onclick="triggerSnapshot()">Take snapshot now</button>
         </div>
       </header>
@@ -70,7 +70,7 @@
           <div style="min-width:320px;">
             <label class="muted" style="display:block;margin-bottom:6px;">View day (IST)</label>
             <div class="flex">
-              <select id="daySelect" onchange="loadForDay()">
+              <select id="daySelect" onchange="onDayChange()">
                 <option value="">— Select day —</option>
               </select>
               <button onclick="clearDay()">Show all</button>
@@ -123,10 +123,11 @@
                   <th>Total Views</th>
                   <th>Gain</th>
                   <th>Hourly Gain</th>
+                  <th>Day Gain</th>
                 </tr>
               </thead>
               <tbody id="tableBody">
-                <tr><td colspan="4">Loading…</td></tr>
+                <tr><td colspan="5">Loading…</td></tr>
               </tbody>
             </table>
           </div>
@@ -135,7 +136,7 @@
       </div>
 
       <div style="margin-top:12px;">
-        <div class="note">Hourly Gain is (current snapshot) − (snapshot 1 hour earlier). If exact 1-hour-prior snapshot isn't found, the server looks ±5s, then the nearest snapshot within 10 minutes and marks it approximate.</div>
+        <div class="note">Hourly Gain = (current snapshot) − (snapshot 1 hour earlier). "Day Gain" = (current snapshot) − (first snapshot of the same day). If exact 1-hour-prior snapshot isn't found, the server looks ±5s, then the nearest snapshot within 10 minutes and marks it approximate (*).</div>
       </div>
     </div>
   </div>
@@ -150,7 +151,11 @@
     const snapHint = document.getElementById("snapHint");
     const errorEl = document.getElementById("error");
 
-    // helper to format IST timestamps nicely
+    // Track latest snapshot timestamp we know about
+    let lastSnapshotTs = null;
+    let dailyLoadedOnce = false;
+    let historyLoadedOnce = false;
+
     function formatIST(dateStr) {
       const d = new Date(dateStr);
       return d.toLocaleString("en-IN", {
@@ -165,53 +170,77 @@
       });
     }
 
-    // helper to keep scroll position stable while updating content
     function preserveScrollAndUpdate(containerEl, updateFn) {
       const scrollTop = containerEl.scrollTop;
       updateFn();
-      // restore after a tiny delay to let DOM update
       setTimeout(() => { containerEl.scrollTop = scrollTop; }, 10);
     }
 
-    async function loadTotal(){
+    async function fetchTotalAndMaybeUpdate() {
       try {
         const res = await fetch("/total");
+        if (!res.ok) throw new Error("failed /total");
         const data = await res.json();
+        const ts = data.ts || null;
         if (data.total_views !== null) {
           totalEl.innerText = Number(data.total_views).toLocaleString();
-          lastUpdateEl.innerText = data.ts ? "Last snapshot: " + formatIST(data.ts) : "";
+          lastUpdateEl.innerText = ts ? "Last snapshot: " + formatIST(ts) : "";
         } else {
           totalEl.innerText = "—";
           lastUpdateEl.innerText = "—";
         }
+
+        // if this is the first time, or snapshot ts changed since last fetch -> refresh daily/history
+        if (!lastSnapshotTs || (ts && ts !== lastSnapshotTs)) {
+          lastSnapshotTs = ts;
+          await loadDaily(false);
+          if (daySelect.value) {
+            await loadHistoryForDay(daySelect.value, false);
+          }
+        }
       } catch (e) {
-        totalEl.innerText = "—";
-        lastUpdateEl.innerText = "—";
+        console.error("fetchTotal failed", e);
       }
     }
 
-    async function loadDaily(){
-      // update daily summary; preserve scroll of its container (if any)
-      try {
-        const res = await fetch("/daily");
-        const data = await res.json();
-        dailyBody.innerHTML = "";
-        if (!Array.isArray(data) || data.length === 0) {
-          dailyBody.innerHTML = "<tr><td colspan='5'>No daily data yet</td></tr>";
-          return;
-        }
-        // build rows
-        data.forEach(row => {
-          const tr = document.createElement("tr");
-          tr.innerHTML = `<td>${row.day}</td>
-                          <td class="num">${Number(row.first_total).toLocaleString()}</td>
-                          <td class="num">${Number(row.last_total).toLocaleString()}</td>
-                          <td class="num ${row.daily_gain>=0?'gain-positive':'gain-negative'}">${(row.daily_gain>=0?'+':'')+Number(row.daily_gain).toLocaleString()}</td>
-                          <td>${row.snaps}</td>`;
-          dailyBody.appendChild(tr);
-        });
+    async function manualRefresh() {
+      totalEl.innerText = "Loading…";
+      lastUpdateEl.innerText = "—";
+      dailyBody.innerHTML = "<tr><td colspan='5'>Loading…</td></tr>";
+      tableBody.innerHTML = "<tr><td colspan='5'>Loading…</td></tr>";
+      lastSnapshotTs = null; // force reload
+      await fetchTotalAndMaybeUpdate();
+    }
 
-        // populate day selector (most recent first)
+    async function loadDaily(showLoading = true) {
+      try {
+        if (showLoading && !dailyLoadedOnce) {
+          dailyBody.innerHTML = "<tr><td colspan='5'>Loading…</td></tr>";
+        }
+        const res = await fetch("/daily");
+        if (!res.ok) throw new Error("failed /daily");
+        const data = await res.json();
+
+        const newBody = document.createDocumentFragment();
+        if (!Array.isArray(data) || data.length === 0) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = "<td colspan='5'>No daily data yet</td>";
+          newBody.appendChild(tr);
+        } else {
+          data.forEach(row => {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `<td>${row.day}</td>
+                            <td class="num">${Number(row.first_total).toLocaleString()}</td>
+                            <td class="num">${Number(row.last_total).toLocaleString()}</td>
+                            <td class="num ${row.daily_gain>=0?'gain-positive':'gain-negative'}">${(row.daily_gain>=0?'+':'')+Number(row.daily_gain).toLocaleString()}</td>
+                            <td>${row.snaps}</td>`;
+            newBody.appendChild(tr);
+          });
+        }
+        dailyBody.innerHTML = "";
+        dailyBody.appendChild(newBody);
+
+        const prevSelected = daySelect.value || null;
         daySelect.innerHTML = "<option value=''>— Select day —</option>";
         data.forEach(row => {
           const opt = document.createElement("option");
@@ -220,44 +249,55 @@
           daySelect.appendChild(opt);
         });
 
-        // auto-select today's date on initial load if available
-        const today = new Date().toLocaleDateString('en-CA', {timeZone: 'Asia/Kolkata'}); // YYYY-MM-DD
-        // If the selector contains today's date, set it and load that day's snapshots (priority to date data)
-        const opts = Array.from(daySelect.options).map(o => o.value);
-        if (opts.includes(today)) {
-          daySelect.value = today;
-          await loadForDay(); // load today's snapshots and show last ~20min
-        } else {
-          // otherwise show the most recent day automatically
-          if (data.length > 0) {
+        if (!dailyLoadedOnce) {
+          const today = new Date().toLocaleDateString('en-CA', {timeZone: 'Asia/Kolkata'}); // YYYY-MM-DD
+          const opts = Array.from(daySelect.options).map(o => o.value);
+          if (opts.includes(today)) {
+            daySelect.value = today;
+            await loadHistoryForDay(today, true);
+          } else if (data.length > 0) {
             daySelect.value = data[0].day;
-            await loadForDay();
+            await loadHistoryForDay(data[0].day, true);
+          } else {
+            tableBody.innerHTML = "<tr><td colspan='5'>No snapshots yet</td></tr>";
+          }
+        } else {
+          if (prevSelected) {
+            if (Array.from(daySelect.options).some(o => o.value === prevSelected)) {
+              daySelect.value = prevSelected;
+              await loadHistoryForDay(prevSelected, false);
+            } else {
+              daySelect.value = "";
+            }
           }
         }
 
+        dailyLoadedOnce = true;
       } catch (e) {
-        dailyBody.innerHTML = "<tr><td colspan='5'>Failed to load daily data</td></tr>";
+        console.error("loadDaily failed", e);
+        if (!dailyLoadedOnce) {
+          dailyBody.innerHTML = "<tr><td colspan='5'>Failed to load daily data</td></tr>";
+        }
       }
     }
 
-    async function loadHistoryForDay(day) {
-      // preserve scroll position of the daySnapshots container to avoid jumpiness
-      preserveScrollAndUpdate(daySnapshots, async () => {
-        tableBody.innerHTML = "<tr><td colspan='4'>Loading…</td></tr>";
-        try {
-          const url = day ? `/history?day=${day}` : "/history";
-          const res = await fetch(url);
-          const data = await res.json();
+    async function loadHistoryForDay(day, showLoading = false) {
+      try {
+        if (showLoading && !historyLoadedOnce) {
+          tableBody.innerHTML = "<tr><td colspan='5'>Loading…</td></tr>";
+        }
+        const url = day ? `/history?day=${day}` : "/history";
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("failed /history");
+        const data = await res.json();
 
-          if (!Array.isArray(data) || data.length === 0) {
-            tableBody.innerHTML = "<tr><td colspan='4'>No snapshots for this day</td></tr>";
-            return;
-          }
-
-          // Show only last ~20 minutes worth on open: last 2 snapshots (10min interval) — but allow full view if user scrolls
-          // We display all rows but we will scroll to show the last 2 (most recent) visible on top.
-          tableBody.innerHTML = "";
-          data.forEach((row, idx) => {
+        const newBody = document.createDocumentFragment();
+        if (!Array.isArray(data) || data.length === 0) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = "<td colspan='5'>No snapshots for this day</td>";
+          newBody.appendChild(tr);
+        } else {
+          data.forEach(row => {
             const tr = document.createElement("tr");
 
             const timeTd = document.createElement("td");
@@ -285,57 +325,71 @@
               const hg = Number(row.hourly_gain);
               hrTd.innerText = (hg >= 0 ? "+" : "") + hg.toLocaleString();
               hrTd.classList.add(hg >= 0 ? "gain-positive" : "gain-negative");
-              if (row.hourly_approx) {
-                hrTd.innerText += " *"; // mark approximate
-              }
+              if (row.hourly_approx) hrTd.innerText += " *";
+            }
+
+            const dayGainTd = document.createElement("td");
+            dayGainTd.className = "num";
+            if (row.day_gain === null) {
+              dayGainTd.innerText = "—";
+            } else {
+              const dg = Number(row.day_gain);
+              dayGainTd.innerText = (dg >= 0 ? "+" : "") + dg.toLocaleString();
+              dayGainTd.classList.add(dg >= 0 ? "gain-positive" : "gain-negative");
             }
 
             tr.appendChild(timeTd);
             tr.appendChild(totalTd);
             tr.appendChild(gainTd);
             tr.appendChild(hrTd);
-            tableBody.appendChild(tr);
+            tr.appendChild(dayGainTd);
+            newBody.appendChild(tr);
           });
+        }
 
-          // Auto-scroll to show most recent ~20 minutes (last 2 snapshots) at top of scrolling viewport
-          // Only do this when a day was explicitly selected or on initial page open.
-          // Find last rows height and set scrollTop accordingly.
-          // small timeout to allow DOM size to settle
+        preserveScrollAndUpdate(daySnapshots, () => {
+          tableBody.innerHTML = "";
+          tableBody.appendChild(newBody);
+        });
+
+        if (!historyLoadedOnce) {
           setTimeout(() => {
             try {
-              // compute position to show last 2 rows
               const rows = tableBody.querySelectorAll("tr");
-              const visibleCount = 2; // show ~20 minutes => 2 snapshots (10-min interval)
+              const visibleCount = 2; // show ~20 minutes => 2 snapshots
               if (rows.length > visibleCount) {
-                const targetRow = rows[visibleCount - 1]; // keep top such that last rows are visible
+                const targetRow = rows[visibleCount - 1];
                 daySnapshots.scrollTop = targetRow.offsetTop - 8;
               } else {
                 daySnapshots.scrollTop = 0;
               }
-            } catch (e) { /* ignore scroll calc errors */ }
+            } catch (e) { /* ignore */ }
           }, 40);
-
-        } catch (e) {
-          tableBody.innerHTML = "<tr><td colspan='4'>Failed to load snapshots</td></tr>";
         }
-      });
+
+        historyLoadedOnce = true;
+      } catch (e) {
+        console.error("loadHistory failed", e);
+        if (!historyLoadedOnce) {
+          tableBody.innerHTML = "<tr><td colspan='5'>Failed to load snapshots</td></tr>";
+        }
+      }
     }
 
-    async function loadForDay() {
+    function onDayChange() {
       const selected = daySelect.value;
       if (!selected) {
-        // show all recent snapshots (default table)
-        await loadHistoryForDay("");
+        loadHistoryForDay("", true);
         snapHint.innerText = "Showing recent snapshots (all days)";
-        return;
+      } else {
+        snapHint.innerText = "Showing snapshots for " + selected;
+        loadHistoryForDay(selected, true);
       }
-      snapHint.innerText = "Showing snapshots for " + selected;
-      await loadHistoryForDay(selected);
     }
 
     function clearDay(){
       daySelect.value = "";
-      loadForDay();
+      onDayChange();
     }
 
     async function triggerSnapshot(){
@@ -343,7 +397,8 @@
         const res = await fetch("/snapshot", { method: "POST" });
         const data = await res.json();
         if (data.status === "ok") {
-          await refreshAll();
+          lastSnapshotTs = null; // force reload on next poll
+          await fetchTotalAndMaybeUpdate();
         } else {
           errorEl.innerText = "Snapshot returned unexpected response";
           errorEl.style.display = "block";
@@ -354,34 +409,19 @@
       }
     }
 
-    // refresh limited parts (do not replace full DOM), preserve scroll positions
-    async function refreshAll(){
-      errorEl.style.display = "none";
-      await loadTotal();
-      await loadDaily();
-      // If a specific day is selected, refresh its history (and keep scroll)
-      if (daySelect.value) {
-        await loadForDay();
-      } else {
-        // show most recent day's data by default (loadForDay handles auto-select on daily load)
-      }
-    }
-
-    // first load
+    // Initial load + polling
     (async () => {
-      await refreshAll();
-      // periodic refresh: update totals & daily summary & current day snapshots without resetting scroll
-      setInterval(async () => {
-        // update in small pieces
-        await loadTotal();
-        // update daily summary (will not change selected day unless selector data changes)
-        await loadDaily();
-        if (daySelect.value) {
-          await loadForDay();
-        }
-      }, 60 * 1000); // every 60s
-    })();
+      totalEl.innerText = "Loading…";
+      lastUpdateEl.innerText = "—";
+      dailyBody.innerHTML = "<tr><td colspan='5'>Loading…</td></tr>";
+      tableBody.innerHTML = "<tr><td colspan='5'>Loading…</td></tr>";
 
+      lastSnapshotTs = null;
+      await fetchTotalAndMaybeUpdate();
+
+      // poll every 60s; only fetch heavy endpoints when snapshot ts changes
+      setInterval(fetchTotalAndMaybeUpdate, 60 * 1000);
+    })();
   </script>
 </body>
 </html>
